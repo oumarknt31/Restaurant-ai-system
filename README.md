@@ -1,3 +1,8 @@
-# Cs_322_AI_Enabled_Resturant_Group_F
+# Restaurant AI System
 
-This repo contains the files and code for the project 
+Stack:
+- Frontend: React (Vite)
+- Backend: Flask (Python)
+- Database: SQLite with SQLAlchemy
+
+Goal: Online restaurant ordering & delivery system with AI-powered chat and role-based users (customers, VIPs, chefs, delivery, manager).
