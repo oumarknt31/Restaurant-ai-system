@@ -2,6 +2,7 @@ from datetime import datetime
 
 from flask import Blueprint, request, jsonify
 
+from sqlalchemy import func
 from extensions import db
 from models import User, Feedback, Order, Dish, DeliveryJob
 
@@ -54,20 +55,27 @@ def apply_customer_warning_rules(user: User):
 def recalculate_chef_hr_actions(chef: User):
     """
     Chef HR rules:
+
+    NEGATIVE SIDE:
     - average rating < 2 OR >= 3 upheld complaints:
-        first time -> demote (chef -> junior_chef)
+        first time -> demote (chef -> junior_chef, with a pay cut)
         second time -> fire (deactivate + blacklist)
+
+    POSITIVE SIDE:
+    - average rating > 4 OR >= 3 compliments:
+        -> bonus (pay raise)
 
     VIP customers' complaints/compliments are counted twice as important:
     - Their ratings count double in the average rating.
     - Their upheld complaints count as 2 in the complaint tally.
+    - Their compliments also count as 2 in the compliment tally.
     """
 
     # Only apply to chef-like roles
     if chef.role not in ["chef", "junior_chef"]:
         return
 
-    # Average rating from feedback with rating
+    # ---------- Average rating (weighted by VIP) ----------
     rating_rows = (
         Feedback.query.filter(
             Feedback.target_user_id == chef.id,
@@ -81,7 +89,7 @@ def recalculate_chef_hr_actions(chef: User):
         for f in rating_rows:
             if f.rating is None:
                 continue
-            # --- NEW: double weight if accuser is VIP ---
+            # double weight if accuser is VIP
             weight = 2 if (f.accuser is not None and f.accuser.role == "vip") else 1
             total += f.rating * weight
             count += weight
@@ -89,35 +97,63 @@ def recalculate_chef_hr_actions(chef: User):
         if count > 0:
             avg_rating = total / count
 
-    # Upheld complaints count (exclude cancelled_by_compliment)
+    # ---------- Upheld complaints (weighted by VIP) ----------
     upheld_complaints = Feedback.query.filter(
         Feedback.target_user_id == chef.id,
         Feedback.type == "complaint",
         Feedback.status == "upheld",
     ).all()
 
-    # --- NEW: VIP complaints count double ---
     upheld_complaints_count = 0
     for f in upheld_complaints:
         weight = 2 if (f.accuser is not None and f.accuser.role == "vip") else 1
         upheld_complaints_count += weight
 
-    trigger = False
-    if avg_rating is not None and avg_rating < 2:
-        trigger = True
-    if upheld_complaints_count >= 3:
-        trigger = True
+    # ---------- Compliments (weighted by VIP) ----------
+    compliment_rows = Feedback.query.filter(
+        Feedback.target_user_id == chef.id,
+        Feedback.type == "compliment",
+    ).all()
 
-    if not trigger:
+    compliments_count = 0
+    for f in compliment_rows:
+        weight = 2 if (f.accuser is not None and f.accuser.role == "vip") else 1
+        compliments_count += weight
+
+    # ---------- Decide HR action ----------
+
+    negative_trigger = False
+    if avg_rating is not None and avg_rating < 2:
+        negative_trigger = True
+    if upheld_complaints_count >= 3:
+        negative_trigger = True
+
+    positive_trigger = False
+    if avg_rating is not None and avg_rating > 4:
+        positive_trigger = True
+    if compliments_count >= 3:
+        positive_trigger = True
+
+    # If both good and bad signals happen at the same time, bad wins.
+    if negative_trigger:
+        # First trigger: demote chef -> junior_chef AND cut pay
+        if chef.role == "chef":
+            chef.role = "junior_chef"
+            if chef.pay_rate is not None:
+                chef.pay_rate = round((chef.pay_rate or 0.0) * 0.8, 2)
+        # Second trigger: fire (deactivate + blacklist)
+        elif chef.role == "junior_chef":
+            chef.is_active = False
+            chef.is_blacklisted = True
+
         return
 
-    # First trigger: demote chef -> junior_chef
-    if chef.role == "chef":
-        chef.role = "junior_chef"
-    # Second trigger: fire (deactivate + blacklist)
-    elif chef.role == "junior_chef":
-        chef.is_active = False
-        chef.is_blacklisted = True
+    # Only apply positive bonus if NOT in a negative trigger
+    if positive_trigger:
+        # Give a bonus raise (e.g., +10%)
+        if chef.pay_rate is not None:
+            chef.pay_rate = round((chef.pay_rate or 0.0) * 1.10, 2)
+
 
 
 def apply_compliment_effect(target: User, weight: int = 1):
@@ -166,7 +202,7 @@ def file_feedback():
       "type": "complaint" | "compliment",
       "rating": 5,           # optional (1-5)
       "reason": "text",      # optional
-      "order_id": 10         # optional
+      "order_id": 10         # optional, REQUIRED for courier→customer feedback
     }
     """
 
@@ -181,7 +217,6 @@ def file_feedback():
 
     if not accuser_id or not target_user_id or not ftype:
         return jsonify({"error": "accuser_id, target_user_id and type are required"}), 400
-    
 
     if ftype not in ["complaint", "compliment"]:
         return jsonify({"error": "type must be 'complaint' or 'compliment'"}), 400
@@ -194,17 +229,20 @@ def file_feedback():
 
     if not accuser or not target:
         return jsonify({"error": "Accuser or target user not found"}), 404
-    
-    # --- OPTIONAL BUT SPEC-ALIGNED: who can file order-based feedback ---
-    # If order_id is provided, enforce that:
+
+    # --- ORDER-BASED RULES (customers & delivery) ---
+    # If order_id is provided, enforce:
     # - Customers/VIPs can only file feedback for orders they placed.
-    # - Delivery/courier users can only file feedback for orders they delivered.
+    # - Delivery/courier users can only file feedback for orders they delivered,
+    #   and only about the customer on that order, AFTER the job is delivered.
+    order = None
+    job = None
     if order_id is not None:
         order = Order.query.get(order_id)
         if not order:
             return jsonify({"error": "Order not found for given order_id"}), 404
 
-        # If accuser is a customer or VIP, they must be the customer for this order.
+        # Customers/VIPs: must own the order
         if accuser.role in ["customer", "vip"]:
             if order.customer_id != accuser.id:
                 return jsonify(
@@ -216,17 +254,42 @@ def file_feedback():
                     }
                 ), 403
 
-        # If accuser is a delivery person, they must be the courier assigned to that order.
+        # Delivery/courier: must be the assigned courier,
+        # job must be delivered, and target must be the customer.
         if accuser.role in ["delivery", "courier"]:
             job = DeliveryJob.query.filter_by(
-                order_id=order.id, courier_id=accuser.id
+                order_id=order.id,
+                courier_id=accuser.id,
             ).first()
+
             if not job:
                 return jsonify(
                     {
                         "error": (
                             "Delivery people can only file feedback for "
-                            "orders they delivered."
+                            "orders they actually delivered."
+                        )
+                    }
+                ), 403
+
+            # ✅ Must be delivered
+            if job.status != "delivered":
+                return jsonify(
+                    {
+                        "error": (
+                            "Delivery people can only complain/compliment customers "
+                            "after marking the delivery as 'delivered'."
+                        )
+                    }
+                ), 403
+
+            # ✅ Must be about the customer of that job
+            if job.customer_id != target.id:
+                return jsonify(
+                    {
+                        "error": (
+                            "Delivery people can only complain/compliment the "
+                            "customer they delivered to for this order."
                         )
                     }
                 ), 403
@@ -239,7 +302,7 @@ def file_feedback():
         except ValueError:
             return jsonify({"error": "rating must be an integer"}), 400
 
-    # Compliments: status 'applied' immediately
+    # ----- COMPLIMENT PATH -----
     if ftype == "compliment":
         feedback = Feedback(
             type="compliment",
@@ -254,13 +317,11 @@ def file_feedback():
         )
         db.session.add(feedback)
 
-        # Apply compliment effects (cancel upheld complaints, chef rules)
-        # --- NEW: VIP compliments count twice as important ---
-        weight = 2 if accuser.role == "vip" else 1
-        apply_compliment_effect(target, weight=weight)
+        # Apply compliment effects (cancel exactly ONE upheld complaint, if any)
+        apply_compliment_effect(target, weight=1)
 
         db.session.commit()
-
+        
         return jsonify(
             {
                 "id": feedback.id,
@@ -270,7 +331,7 @@ def file_feedback():
             }
         ), 201
 
-    # Complaints: start as 'pending', manager will review
+    # ----- COMPLAINT PATH -----
     feedback = Feedback(
         type="complaint",
         accuser_id=accuser.id,
@@ -292,6 +353,7 @@ def file_feedback():
             "message": "Complaint recorded and pending manager review.",
         }
     ), 201
+
 
 
 @reputation_bp.route("/rate-dish", methods=["POST"])
@@ -353,19 +415,21 @@ def rate_dish():
 
     # Store as a Feedback row with a rating (positive or negative).
     feedback = Feedback(
-        type="compliment",  # we use compliments + rating for chef HR, complaints remain separate
-        accuser_id=customer.id,
-        target_user_id=chef.id,
-        order_id=order.id,
-        rating=rating_value,
-        reason=(
-            f"Food rating for order #{order.id}, dish '{dish.name}': {rating_value} stars."
-            + (f" Comment: {comment}" if comment else "")
-        ),
-        status="applied",
-        created_at=datetime.utcnow(),
-        resolved_at=datetime.utcnow(),
-    )
+    type="compliment",
+    accuser_id=customer.id,
+    target_user_id=chef.id,
+    order_id=order.id,
+    dish_id=dish.id,   # 👈 tie rating to this dish
+    rating=rating_value,
+    reason=(
+        f"Food rating for order #{order.id}, dish '{dish.name}': {rating_value} stars."
+        + (f" Comment: {comment}" if comment else "")
+    ),
+    status="applied",
+    created_at=datetime.utcnow(),
+    resolved_at=datetime.utcnow(),
+)
+
     db.session.add(feedback)
 
     # Recalculate chef HR-based rating rules (average rating, etc.)
@@ -382,6 +446,272 @@ def rate_dish():
             "rating": rating_value,
         }
     ), 201
+
+@reputation_bp.route("/my-customer-feedback/<int:accuser_id>", methods=["GET"])
+def my_customer_feedback(accuser_id):
+    """
+    All complaints/compliments that THIS user (courier/delivery) filed
+    about customers.
+    Used in DeliveryJobsPage -> "My feedback about customers" tab.
+    """
+
+    accuser = User.query.get(accuser_id)
+    if not accuser:
+        return jsonify({"error": "User not found"}), 404
+
+    # all feedback rows where this user is the accuser
+    # and the target is a customer (role='customer' or 'vip' if you want)
+    feedback_rows = (
+        Feedback.query
+        .join(User, Feedback.target_user_id == User.id)
+        .filter(
+            Feedback.accuser_id == accuser_id,
+            Feedback.type.in_(["complaint", "compliment"]),
+            # target is a customer-like role; tweak if you want VIP included
+            User.role.in_(["customer", "vip"])
+        )
+        .order_by(Feedback.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for f in feedback_rows:
+        result.append(
+            {
+                "id": f.id,
+                "type": f.type,  # "complaint" or "compliment"
+                "status": f.status,  # "pending", "upheld", "dismissed", "applied", etc.
+                "rating": f.rating,
+                "reason": f.reason,
+                "order_id": f.order_id,
+                "target_user_id": f.target_user_id,
+                "target_user_name": f.target_user.name if f.target_user else None,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+        )
+
+    return jsonify(result), 200
+
+
+@reputation_bp.route("/performance-summary", methods=["GET"])
+def performance_summary():
+    """
+    Aggregate performance metrics for chefs and couriers so the Manager
+    can see them in a dashboard (charts).
+
+    Returns JSON like:
+    {
+      "chefs": [
+        {
+          "id": 5,
+          "name": "Chef Marco",
+          "role": "chef",
+          "average_rating": 4.3,
+          "total_compliments": 10,
+          "upheld_complaints": 1,
+          "warnings": 0
+        },
+        ...
+      ],
+      "couriers": [
+        {
+          "id": 8,
+          "name": "Courier Sam",
+          "role": "courier",
+          "deliveries_completed": 14,
+          "average_delivery_rating": 4.8,
+          "total_compliments": 7,
+          "upheld_complaints": 0,
+          "warnings": 1
+        },
+        ...
+      ]
+    }
+    """
+
+    # ---- CHEFS ----
+    chefs = User.query.filter(User.role.in_(["chef", "junior_chef"])).all()
+    chef_ids = [c.id for c in chefs]
+
+    chef_avg_rating = {}
+    chef_total_compliments = {}
+    chef_upheld_complaints = {}
+
+    if chef_ids:
+        #
+        # Average rating for each chef (uses Feedback.rating)
+        #
+        rows = (
+            db.session.query(
+                Feedback.target_user_id,
+                func.avg(Feedback.rating)
+            )
+            .filter(
+                Feedback.target_user_id.in_(chef_ids),
+                Feedback.rating.isnot(None),
+            )
+            .group_by(Feedback.target_user_id)
+            .all()
+        )
+        for uid, avg in rows:
+            chef_avg_rating[uid] = float(avg or 0)
+
+        #
+        # Total compliments per chef
+        #
+        rows = (
+            db.session.query(
+                Feedback.target_user_id,
+                func.count(Feedback.id),
+            )
+            .filter(
+                Feedback.target_user_id.in_(chef_ids),
+                Feedback.type == "compliment",
+            )
+            .group_by(Feedback.target_user_id)
+            .all()
+        )
+        for uid, count in rows:
+            chef_total_compliments[uid] = int(count or 0)
+
+        #
+        # Upheld complaints per chef
+        #
+        rows = (
+            db.session.query(
+                Feedback.target_user_id,
+                func.count(Feedback.id),
+            )
+            .filter(
+                Feedback.target_user_id.in_(chef_ids),
+                Feedback.type == "complaint",
+                Feedback.status == "upheld",
+            )
+            .group_by(Feedback.target_user_id)
+            .all()
+        )
+        for uid, count in rows:
+            chef_upheld_complaints[uid] = int(count or 0)
+
+    chef_result = []
+    for c in chefs:
+        chef_result.append(
+            {
+                "id": c.id,
+                "name": c.name,
+                "role": c.role,
+                "average_rating": chef_avg_rating.get(c.id, 0.0),
+                "total_compliments": chef_total_compliments.get(c.id, 0),
+                "upheld_complaints": chef_upheld_complaints.get(c.id, 0),
+                "warnings": c.warnings or 0,
+            }
+        )
+
+    # ---- COURIERS ----
+    couriers = User.query.filter(User.role.in_(["courier", "delivery"])).all()
+    courier_ids = [u.id for u in couriers]
+
+    courier_deliveries_completed = {}
+    courier_avg_delivery_rating = {}
+    courier_total_compliments = {}
+    courier_upheld_complaints = {}
+
+    if courier_ids:
+        #
+        # Total completed deliveries per courier
+        #
+        rows = (
+            db.session.query(
+                DeliveryJob.courier_id,
+                func.count(DeliveryJob.id),
+            )
+            .filter(
+                DeliveryJob.courier_id.in_(courier_ids),
+                DeliveryJob.status == "delivered",
+            )
+            .group_by(DeliveryJob.courier_id)
+            .all()
+        )
+        for courier_id, count in rows:
+            courier_deliveries_completed[courier_id] = int(count or 0)
+
+        #
+        # Average *delivery* rating per courier
+        # (Feedback rows with rating where target_user is courier)
+        #
+        rows = (
+            db.session.query(
+                Feedback.target_user_id,
+                func.avg(Feedback.rating),
+            )
+            .filter(
+                Feedback.target_user_id.in_(courier_ids),
+                Feedback.rating.isnot(None),
+            )
+            .group_by(Feedback.target_user_id)
+            .all()
+        )
+        for uid, avg in rows:
+            courier_avg_delivery_rating[uid] = float(avg or 0)
+
+        #
+        # Compliments per courier
+        #
+        rows = (
+            db.session.query(
+                Feedback.target_user_id,
+                func.count(Feedback.id),
+            )
+            .filter(
+                Feedback.target_user_id.in_(courier_ids),
+                Feedback.type == "compliment",
+            )
+            .group_by(Feedback.target_user_id)
+            .all()
+        )
+        for uid, count in rows:
+            courier_total_compliments[uid] = int(count or 0)
+
+        #
+        # Upheld complaints per courier
+        #
+        rows = (
+            db.session.query(
+                Feedback.target_user_id,
+                func.count(Feedback.id),
+            )
+            .filter(
+                Feedback.target_user_id.in_(courier_ids),
+                Feedback.type == "complaint",
+                Feedback.status == "upheld",
+            )
+            .group_by(Feedback.target_user_id)
+            .all()
+        )
+        for uid, count in rows:
+            courier_upheld_complaints[uid] = int(count or 0)
+
+    courier_result = []
+    for u in couriers:
+        courier_result.append(
+            {
+                "id": u.id,
+                "name": u.name,
+                "role": u.role,
+                "deliveries_completed": courier_deliveries_completed.get(u.id, 0),
+                "average_delivery_rating": courier_avg_delivery_rating.get(u.id, 0.0),
+                "total_compliments": courier_total_compliments.get(u.id, 0),
+                "upheld_complaints": courier_upheld_complaints.get(u.id, 0),
+                "warnings": u.warnings or 0,
+            }
+        )
+
+    return jsonify(
+        {
+            "chefs": chef_result,
+            "couriers": courier_result,
+        }
+    ), 200
 
 
 @reputation_bp.route("/rate-delivery", methods=["POST"])
@@ -466,32 +796,45 @@ def rate_delivery():
 @reputation_bp.route("/pending-complaints", methods=["GET"])
 def list_pending_complaints():
     """
-    List all pending complaints for manager review.
+    Manager/staff/admin view of ALL pending complaints in the system.
+    Each item includes accuser & target info so manager can decide to
+    uphold or dismiss.
     """
 
-    pending = Feedback.query.filter(
-        Feedback.type == "complaint", Feedback.status == "pending"
-    ).order_by(Feedback.created_at.asc())
+    # Optional: restrict to manager-like roles if you have auth helpers
+    # current_user = get_current_user()
+    # if current_user.role not in ["manager", "admin", "staff"]:
+    #     return jsonify({"error": "Forbidden"}), 403
 
-    result = []
+    pending = (
+        Feedback.query
+        .filter(
+            Feedback.type == "complaint",
+            Feedback.status == "pending",
+        )
+        .order_by(Feedback.created_at.desc())
+        .all()
+    )
+
+    results = []
     for f in pending:
-        result.append(
+        results.append(
             {
                 "id": f.id,
-                "accuser_id": f.accuser_id,
-                "accuser_name": f.accuser.name if hasattr(f.accuser, "name") else None,
-                "target_user_id": f.target_user_id,
-                "target_user_name": f.target_user.name
-                if hasattr(f.target_user, "name")
-                else None,
-                "order_id": f.order_id,
-                "rating": f.rating,
+                "type": f.type,
+                "status": f.status,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
                 "reason": f.reason,
-                "created_at": f.created_at.isoformat(),
+                "rating": f.rating,
+                "order_id": f.order_id,
+                "accuser_id": f.accuser_id,
+                "accuser_name": f.accuser.name if f.accuser else None,
+                "target_user_id": f.target_user_id,
+                "target_user_name": f.target_user.name if f.target_user else None,
             }
         )
 
-    return jsonify(result), 200
+    return jsonify(results), 200
 
 
 @reputation_bp.route("/review-complaint", methods=["POST"])
@@ -549,10 +892,21 @@ def review_complaint():
     feedback.manager_id = manager.id
     feedback.resolved_at = datetime.utcnow()
 
+    # --- NEW: add a system note visible to both parties ---
+    decision_note = (
+        f"[System note {feedback.resolved_at.isoformat()}] "
+        f"Complaint {decision} by manager {manager.name} (id={manager.id})."
+    )
+
+    if feedback.reason:
+        feedback.reason = feedback.reason + "\n" + decision_note
+    else:
+        feedback.reason = decision_note
+
     if decision == "dismissed":
         feedback.status = "dismissed"
 
-        # Warning to accuser
+        # Warning to accuser (false / rejected complaint)
         accuser.warnings = (accuser.warnings or 0) + 1
         apply_customer_warning_rules(accuser)
 
@@ -570,7 +924,11 @@ def review_complaint():
     # decision == 'upheld'
     feedback.status = "upheld"
 
-    # Apply chef HR rules if target is chef/junior_chef
+    # 🔹 Warning goes to the TARGET of the complaint (chef, courier, or customer)
+    target.warnings = (target.warnings or 0) + 1
+    apply_customer_warning_rules(target)
+
+    # 🔹 Chef-specific HR rules (demote/fire based on ratings + upheld complaints)
     if target.role in ["chef", "junior_chef"]:
         recalculate_chef_hr_actions(target)
 
@@ -580,9 +938,11 @@ def review_complaint():
         {
             "id": feedback.id,
             "status": feedback.status,
-            "message": "Complaint upheld and HR rules applied.",
+            "target_warnings": target.warnings,
+            "message": "Complaint upheld. Target received a warning and HR rules applied if needed.",
         }
     ), 200
+
 
 @reputation_bp.route("/dispute", methods=["POST"])
 def dispute_complaint():
@@ -677,3 +1037,43 @@ def list_complaints_about_me(user_id):
         })
 
     return jsonify(data), 200
+
+@reputation_bp.route("/by-me/<int:user_id>", methods=["GET"])
+def list_feedback_by_me(user_id):
+    """
+    Shows all complaints AND compliments that this user filed about others.
+    Used so the user can see their own feedback history.
+    """
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    feedback_rows = (
+        Feedback.query
+        .filter(
+            Feedback.accuser_id == user_id,
+            Feedback.type.in_(["complaint", "compliment"]),
+        )
+        .order_by(Feedback.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for f in feedback_rows:
+        result.append(
+            {
+                "id": f.id,
+                "type": f.type,  # "complaint" or "compliment"
+                "status": f.status,  # pending / upheld / dismissed / applied / cancelled_by_compliment / …
+                "rating": f.rating,
+                "reason": f.reason,
+                "order_id": f.order_id,
+                "target_user_id": f.target_user_id,
+                "target_user_name": f.target_user.name if f.target_user else None,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+        )
+
+    return jsonify(result), 200
+

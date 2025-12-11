@@ -10,6 +10,9 @@ function ReputationManagementPage() {
   const [complaintsAgainstMe, setComplaintsAgainstMe] = useState([]);
   const [disputeLoadingId, setDisputeLoadingId] = useState(null);
 
+  const [feedbackByMe, setFeedbackByMe] = useState([]);
+  const [feedbackByMeLoading, setFeedbackByMeLoading] = useState(false);
+
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
@@ -32,13 +35,31 @@ function ReputationManagementPage() {
     // Everyone: complaints about themselves
     fetchComplaintsAgainstMe();
 
-    // Manager/staff/admin: pending complaints + chef summary
-    if (isManager) {
-      fetchPendingComplaints();
-      fetchChefSummary();
-    }
+    // Manager / Staff / Admin can review ALL pending complaints
+  if (["manager", "admin", "staff"].includes(currentUser.role)) {
+    fetchPendingComplaints();   // << ⭐ THIS is the important part
+    fetchChefSummary();         // (optional but your page already includes it)
+  }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // Everyone: complaints about themselves
+    fetchComplaintsAgainstMe();
+
+    // NEW: everyone can see what THEY filed about others
+    fetchFeedbackByMe();
+
+    // Manager / Staff / Admin can review ALL pending complaints
+  if (["manager", "admin", "staff"].includes(currentUser.role)) {
+    fetchPendingComplaints();   // << ⭐ THIS is the important part
+    fetchChefSummary();         // (optional but your page already includes it)
+  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
+
 
   // ---------- API helpers ----------
 
@@ -50,6 +71,21 @@ function ReputationManagementPage() {
       console.error(err);
     }
   }
+
+  async function fetchFeedbackByMe() {
+    if (!currentUser) return;
+    setFeedbackByMeLoading(true);
+    try {
+      const res = await api.get(`/reputation/by-me/${currentUser.id}`);
+      setFeedbackByMe(res.data || []);
+    } catch (err) {
+      console.error(err);
+      // We won't surface this as a blocking error, just log
+    } finally {
+      setFeedbackByMeLoading(false);
+    }
+  }
+
 
   async function handleDispute(feedbackId) {
     if (!currentUser) return;
@@ -81,6 +117,16 @@ function ReputationManagementPage() {
   }
 
   async function fetchPendingComplaints() {
+    try {
+      const res = await api.get("/reputation/pending-complaints");
+      setPendingComplaints(res.data || []);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  
+  
+  async function fetchPendingComplaints() {
     setError("");
     try {
       const res = await api.get("/reputation/pending-complaints");
@@ -102,38 +148,35 @@ function ReputationManagementPage() {
     }
   }
 
-  async function handleReview(feedbackId, decision) {
-    if (!currentUser) return;
-
+  async function handleReview(complaintId, decision) {
+    setLoading(true);
     setError("");
     setSuccess("");
-    setLoading(true);
-
+  
     try {
-      await api.post("/reputation/review-complaint", {
-        manager_user_id: currentUser.id,
-        feedback_id: feedbackId,
-        decision,
+      const res = await api.post("/reputation/review-complaint", {
+        complaint_id: complaintId,
+        decision, // "upheld" or "dismissed"
       });
-
-      setSuccess(
-        decision === "upheld"
-          ? "Complaint upheld and HR rules applied."
-          : "Complaint dismissed and warning applied if needed."
+  
+      setSuccess(res.data?.message || "Decision recorded.");
+  
+      // Remove this complaint from the pending list
+      setPendingComplaints((prev) =>
+        prev.filter((c) => c.id !== complaintId)
       );
-      await fetchPendingComplaints();
-      await fetchChefSummary();
+  
+      // Optionally refresh "complaintsAgainstMe" / chefSummary if needed
+      fetchComplaintsAgainstMe();
+      fetchChefSummary();
     } catch (err) {
       console.error(err);
-      if (err.response?.data?.error) {
-        setError(err.response.data.error);
-      } else {
-        setError("Failed to review complaint.");
-      }
+      setError("Failed to submit review decision.");
     } finally {
       setLoading(false);
     }
   }
+  
 
   // ---------- Render ----------
 
@@ -154,77 +197,203 @@ function ReputationManagementPage() {
         View complaints about you, and (if you are staff/manager/admin) review
         pending complaints and chef performance according to HR rules.
       </p>
-
+  
       {error && <p style={{ color: "red" }}>Error: {error}</p>}
       {success && <p style={{ color: "green" }}>{success}</p>}
-
+  
       {/* ▶ SECTION 1 — Complaints Filed Against YOU (everyone can see) */}
       <section style={{ marginTop: "1.5rem" }}>
         <h3>Complaints Filed Against You</h3>
+        <p style={{ fontSize: "0.8rem", color: "#6c757d" }}>
+          <span style={{ color: "#842029" }}>Red</span> = upheld (counts as a
+          warning),{" "}
+          <span style={{ color: "#0f5132" }}>Green</span> = dismissed / cancelled,
+          Yellow = pending.
+        </p>
         {complaintsAgainstMe.length === 0 ? (
           <p>No complaints about you.</p>
         ) : (
-          complaintsAgainstMe.map((c) => (
-            <div
-              key={c.id}
-              style={{
-                border: "1px solid #ccc",
-                borderRadius: "8px",
-                padding: "0.75rem 1rem",
-                marginBottom: "0.75rem",
-                backgroundColor: "#fff",
-              }}
-            >
-              <p>
-                <strong>Complaint #{c.id}</strong> — filed{" "}
-                {new Date(c.created_at).toLocaleString()}
-              </p>
-              <p>
-                <strong>From:</strong> {c.accuser_name || `User ${c.accuser_id}`}{" "}
-                (ID: {c.accuser_id})
-              </p>
-              {c.order_id && (
+          complaintsAgainstMe.map((c) => {
+            let bgColor = "#fff";
+            let borderColor = "#ccc";
+            let statusTextColor = "#212529";
+  
+            if (c.status === "upheld") {
+              // Warning against you
+              bgColor = "#fde2e1"; // light red
+              borderColor = "#f5c2c7";
+              statusTextColor = "#842029";
+            } else if (
+              c.status === "dismissed" ||
+              c.status === "cancelled_by_compliment"
+            ) {
+              // You were effectively cleared
+              bgColor = "#e6ffed"; // light green
+              borderColor = "#b7f0c8";
+              statusTextColor = "#0f5132";
+            } else if (c.status === "pending") {
+              bgColor = "#fff9db"; // light yellow
+              borderColor = "#ffe08a";
+              statusTextColor = "#856404";
+            }
+  
+            return (
+              <div
+                key={c.id}
+                style={{
+                  border: `1px solid ${borderColor}`,
+                  borderRadius: "8px",
+                  padding: "0.75rem 1rem",
+                  marginBottom: "0.75rem",
+                  backgroundColor: bgColor,
+                }}
+              >
                 <p>
-                  <strong>Order ID:</strong> {c.order_id}
+                  <strong>Complaint #{c.id}</strong> — filed{" "}
+                  {new Date(c.created_at).toLocaleString()}
                 </p>
-              )}
-              {c.reason && (
                 <p>
-                  <strong>Reason:</strong> {c.reason}
+                  <strong>From:</strong>{" "}
+                  {c.accuser_name || `User ${c.accuser_id}`} (ID: {c.accuser_id})
                 </p>
-              )}
-              <p>
-                <strong>Status:</strong> {c.status}
-              </p>
-
-              {c.status === "pending" && (
-                <button
-                  onClick={() => handleDispute(c.id)}
-                  disabled={disputeLoadingId === c.id}
-                  style={{
-                    padding: "0.3rem 0.8rem",
-                    borderRadius: "999px",
-                    border: "1px solid #fd7e14",
-                    backgroundColor:
-                      disputeLoadingId === c.id ? "#fff4e6" : "#ffe8cc",
-                    color: "#d9480f",
-                    cursor:
-                      disputeLoadingId === c.id ? "wait" : "pointer",
-                    fontSize: "0.85rem",
-                    marginTop: "0.4rem",
-                  }}
-                >
-                  {disputeLoadingId === c.id
-                    ? "Submitting..."
-                    : "Dispute Complaint"}
-                </button>
-              )}
-            </div>
-          ))
+                {c.order_id && (
+                  <p>
+                    <strong>Order ID:</strong> {c.order_id}
+                  </p>
+                )}
+                {c.reason && (
+                  <p>
+                    <strong>Reason:</strong> {c.reason}
+                  </p>
+                )}
+                <p>
+                  <strong>Status:</strong>{" "}
+                  <span style={{ color: statusTextColor }}>{c.status}</span>
+                </p>
+  
+                {c.status === "upheld" && (
+                  <p style={{ fontSize: "0.85rem", color: "#842029" }}>
+                    Outcome: <strong>Upheld</strong>. This counts toward your
+                    warnings.
+                  </p>
+                )}
+                {(c.status === "dismissed" ||
+                  c.status === "cancelled_by_compliment") && (
+                  <p style={{ fontSize: "0.85rem", color: "#0f5132" }}>
+                    Outcome: <strong>Cleared</strong>. This complaint does{" "}
+                    <em>not</em> give you a new warning.
+                  </p>
+                )}
+  
+                {c.status === "pending" && (
+                  <button
+                    onClick={() => handleDispute(c.id)}
+                    disabled={disputeLoadingId === c.id}
+                    style={{
+                      padding: "0.3rem 0.8rem",
+                      borderRadius: "999px",
+                      border: "1px solid #fd7e14",
+                      backgroundColor:
+                        disputeLoadingId === c.id ? "#fff4e6" : "#ffe8cc",
+                      color: "#d9480f",
+                      cursor: disputeLoadingId === c.id ? "wait" : "pointer",
+                      fontSize: "0.85rem",
+                      marginTop: "0.4rem",
+                    }}
+                  >
+                    {disputeLoadingId === c.id
+                      ? "Submitting..."
+                      : "Dispute Complaint"}
+                  </button>
+                )}
+              </div>
+            );
+          })
         )}
       </section>
-
-      {/* ▶ SECTION 2 — Manager-only HR Controls */}
+  
+      {/* ▶ SECTION 2 — Your own complaints & compliments about others */}
+      <section style={{ marginTop: "2rem" }}>
+        <h3>Your Complaints &amp; Compliments About Others</h3>
+        <p style={{ fontSize: "0.85rem", color: "#6c757d" }}>
+          Complaints you filed are shown in{" "}
+          <span style={{ color: "#842029" }}>red</span>. Compliments are shown in{" "}
+          <span style={{ color: "#087f5b" }}>green</span>. This includes feedback
+          about chefs, delivery staff, and customers.
+        </p>
+  
+        {feedbackByMeLoading ? (
+          <p>Loading your feedback history…</p>
+        ) : feedbackByMe.length === 0 ? (
+          <p>You have not filed any complaints or compliments yet.</p>
+        ) : (
+          feedbackByMe.map((f) => {
+            const isComplaint = f.type === "complaint";
+            const dateStr = f.created_at
+              ? new Date(f.created_at).toLocaleString()
+              : "";
+  
+            const bgColor = isComplaint ? "#fff5f5" : "#f3fff7";
+            const borderColor = isComplaint ? "#f5c2c7" : "#b7f0c8";
+            const titleColor = isComplaint ? "#842029" : "#087f5b";
+  
+            return (
+              <div
+                key={f.id}
+                style={{
+                  border: `1px solid ${borderColor}`,
+                  borderRadius: "8px",
+                  padding: "0.75rem 1rem",
+                  marginBottom: "0.75rem",
+                  backgroundColor: bgColor,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    marginBottom: "0.25rem",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontWeight: 600,
+                      color: titleColor,
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {f.type} ·{" "}
+                    {f.target_user_name || `User #${f.target_user_id}`}
+                  </span>
+                  <span style={{ fontSize: "0.8rem", color: "#6c757d" }}>
+                    {dateStr}
+                  </span>
+                </div>
+  
+                <div style={{ fontSize: "0.85rem", marginBottom: "0.25rem" }}>
+                  <strong>Order:</strong>{" "}
+                  {f.order_id != null ? `#${f.order_id}` : "N/A"}{" "}
+                  <strong>Status:</strong> {f.status}
+                  {typeof f.rating === "number" && (
+                    <>
+                      {"  "}
+                      <strong>Rating:</strong> {f.rating} / 5
+                    </>
+                  )}
+                </div>
+  
+                {f.reason && (
+                  <p style={{ fontSize: "0.85rem" }}>
+                    <strong>Notes:</strong> {f.reason}
+                  </p>
+                )}
+              </div>
+            );
+          })
+        )}
+      </section>
+  
+      {/* ▶ SECTION 3 — Manager-only HR Controls */}
       {isManager && (
         <>
           {/* Pending Complaints for Manager */}
@@ -273,7 +442,7 @@ function ReputationManagementPage() {
                       <strong>Reason:</strong> {c.reason}
                     </p>
                   )}
-
+  
                   <div
                     style={{
                       display: "flex",
@@ -315,7 +484,7 @@ function ReputationManagementPage() {
               ))
             )}
           </section>
-
+  
           {/* Chef Summary */}
           <section style={{ marginTop: "2rem" }}>
             <h3>Chef Rating Summary</h3>
@@ -377,7 +546,7 @@ function ReputationManagementPage() {
         </>
       )}
     </div>
-  );
+  );  
 }
 
 export default ReputationManagementPage;

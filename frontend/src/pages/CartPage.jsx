@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import api from "../api/client";
 import { getCurrentUser } from "../auth/user";
 
-function CartPage({ cartItems, removeFromCart, clearCart }) {
+function CartPage({ cartItems, removeFromCart, clearCart, addToCart }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [placingOrder, setPlacingOrder] = useState(false);
   const [error, setError] = useState("");
@@ -43,56 +43,41 @@ function CartPage({ cartItems, removeFromCart, clearCart }) {
     setPlacingOrder(true);
 
     try {
-      // Adjust path if your backend uses a slightly different URL
       const res = await api.post("/orders/", {
         user_id: currentUser.id,
         items: itemsPayload,
       });
 
-      // Store the whole JSON so we can render it nicely
       setOrderResult(res.data);
-
-      // Clear the cart
       clearCart();
     } catch (err) {
       console.error(err);
-      if (err.response?.data?.error) {
-        setError(err.response.data.error);
+      const data = err.response?.data;
+    
+      if (data?.message) {
+        // This will show: "Insufficient balance for this order; you have received a warning for reckless ordering."
+        setError(data.message);
+      } else if (data?.error) {
+        setError(data.error);
       } else {
         setError("Failed to place order. Please try again.");
       }
-    } finally {
+    }
+     finally {
       setPlacingOrder(false);
     }
   }
 
-  function addOne(item) {
-    // We simply re-add the same dish (triggers your add-to-cart logic)
-    const updated = {
-      dish_id: item.dish_id,
+  // ✅ Use parent addToCart so cart state in App actually updates
+  function handleAddOne(item) {
+    addToCart({
+      id: item.dish_id,          // App.addToCart expects dish.id
       name: item.name,
       price: item.price,
-      quantity: 1,
       is_vip_only: item.is_vip_only,
-      image_url: item.image_url
-    };
-  
-    // Reuse the addToCart-like behavior by updating state manually:
-    const existing = cartItems.find((i) => i.dish_id === item.dish_id);
-  
-    if (existing) {
-      const newCart = cartItems.map((i) =>
-        i.dish_id === item.dish_id
-          ? { ...i, quantity: i.quantity + 1 }
-          : i
-      );
-      // Update state
-      const event = new Event("cart-update");
-      window.dispatchEvent(event);
-      alert(`${item.name} +1`);
-    }
+      image_url: item.image_url,
+    });
   }
-  
 
   return (
     <div style={{ padding: "1.5rem", maxWidth: "900px", margin: "0 auto" }}>
@@ -176,7 +161,7 @@ function CartPage({ cartItems, removeFromCart, clearCart }) {
                 {/* Add one button (green) */}
                 <button
                   type="button"
-                  onClick={() => addOne(item)} // you will define addOne below
+                  onClick={() => handleAddOne(item)}
                   style={{
                     marginTop: "0.25rem",
                     fontSize: "0.8rem",
@@ -210,7 +195,6 @@ function CartPage({ cartItems, removeFromCart, clearCart }) {
                   Remove one
                 </button>
               </div>
-
             </div>
           ))}
 
@@ -280,6 +264,7 @@ function CartPage({ cartItems, removeFromCart, clearCart }) {
             boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
           }}
         >
+          {/* ... rest of your orderResult UI stays exactly the same ... */}
           <div
             style={{
               display: "flex",
@@ -311,6 +296,8 @@ function CartPage({ cartItems, removeFromCart, clearCart }) {
               </div>
             )}
           </div>
+
+          {/* ... unchanged content below ... */}
 
           <div
             style={{

@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import api from "../api/client";
 import { getCurrentUser } from "../auth/user";
+
 
 function MyOrdersPage() {
   const [currentUser, setCurrentUser] = useState(null);
   const [orders, setOrders] = useState([]);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const navigate = useNavigate();
 
   // Rating inputs
   const [foodRatings, setFoodRatings] = useState({}); // key: `${orderId}-${dishId}` -> value 1–5
@@ -202,6 +204,70 @@ function MyOrdersPage() {
     }
   }
 
+
+    // ---- NEW: helpers for complaints/compliments via Feedback page ----
+
+    function fileComplaintAboutChef(order, item) {
+      if (!currentUser || !item.chef_id) return;
+  
+      navigate("/feedback", {
+        state: {
+          type: "complaint",
+          targetUserId: item.chef_id,
+          orderId: order.id,
+          targetKind: "chef",
+          displayName: item.chef_name || "the chef",
+          dishName: item.dish_name || null,
+        },
+      });
+    }
+  
+    function fileComplimentAboutChef(order, item) {
+      if (!currentUser || !item.chef_id) return;
+  
+      navigate("/feedback", {
+        state: {
+          type: "compliment",
+          targetUserId: item.chef_id,
+          orderId: order.id,
+          targetKind: "chef",
+          displayName: item.chef_name || "the chef",
+          dishName: item.dish_name || null,
+        },
+      });
+    }
+  
+    function fileComplaintAboutDelivery(order) {
+      if (!currentUser || !order.delivery_job?.courier_id) return;
+  
+      navigate("/feedback", {
+        state: {
+          type: "complaint",
+          targetUserId: order.delivery_job.courier_id,
+          orderId: order.id,
+          targetKind: "delivery",
+          displayName: order.delivery_job.courier_name || "the delivery person",
+          dishName: null,
+        },
+      });
+    }
+  
+    function fileComplimentAboutDelivery(order) {
+      if (!currentUser || !order.delivery_job?.courier_id) return;
+  
+      navigate("/feedback", {
+        state: {
+          type: "compliment",
+          targetUserId: order.delivery_job.courier_id,
+          orderId: order.id,
+          targetKind: "delivery",
+          displayName: order.delivery_job.courier_name || "the delivery person",
+          dishName: null,
+        },
+      });
+    }
+  
+
   // ---- render ----
 
   if (!currentUser) {
@@ -289,7 +355,18 @@ function MyOrdersPage() {
               <div style={{ marginTop: "0.5rem" }}>
                 {order.items.map((item, idx) => {
                   const key = `${order.id}-${item.dish_id}`;
-                  const currentRating = foodRatings[key] || "";
+
+                  // rating previously stored in DB (from backend)
+                  const existingRating = item.my_food_rating ?? null;
+                  
+                  // what shows in the select:
+                  const currentRating =
+                    foodRatings[key] !== undefined
+                      ? foodRatings[key]
+                      : existingRating
+                      ? String(existingRating)
+                      : "";
+                  
 
                   return (
                     <div
@@ -357,6 +434,7 @@ function MyOrdersPage() {
                             }}
                           >
                             <span>Rate food (1–5):</span>
+
                             <select
                               value={currentRating}
                               onChange={(e) =>
@@ -367,6 +445,7 @@ function MyOrdersPage() {
                                 )
                               }
                               style={{ padding: "0.2rem 0.4rem" }}
+                              disabled={existingRating !== null}   // 👈 disable if already rated
                             >
                               <option value="">Select</option>
                               <option value="1">1 ★</option>
@@ -375,28 +454,30 @@ function MyOrdersPage() {
                               <option value="4">4 ★★★★</option>
                               <option value="5">5 ★★★★★</option>
                             </select>
+
                             <button
                               type="button"
-                              onClick={() =>
-                                submitFoodRating(order.id, item.dish_id)
-                              }
-                              disabled={ratingLoadingKey === key}
+                              onClick={() => submitFoodRating(order.id, item.dish_id)}
+                              disabled={existingRating !== null || ratingLoadingKey === key}
                               style={{
                                 padding: "0.25rem 0.6rem",
                                 borderRadius: "999px",
                                 border: "1px solid #0d6efd",
-                                backgroundColor: "#e7f1ff",
-                                color: "#0d6efd",
-                                cursor: "pointer",
+                                backgroundColor: existingRating !== null ? "#e9ecef" : "#e7f1ff",
+                                color: existingRating !== null ? "#6c757d" : "#0d6efd",
+                                cursor: existingRating !== null ? "not-allowed" : "pointer",
                                 fontSize: "0.8rem",
                               }}
                             >
-                              {ratingLoadingKey === key
+                              {existingRating !== null
+                                ? `Already rated: ${existingRating}★`
+                                : ratingLoadingKey === key
                                 ? "Submitting..."
                                 : "Rate food"}
                             </button>
                           </div>
                         )}
+
 
                         {/* Discussion + feedback buttons for this dish / chef */}
                         {isDelivered && (
@@ -413,9 +494,10 @@ function MyOrdersPage() {
                             <Link
                               to="/discussion"
                               state={{
-                                initialTargetType: "dish",
-                                initialTargetId: item.dish_id,
-                                initialTitle: `Discussion on ${item.dish_name} (Order #${order.id})`,
+                                initialCategory: "dish",
+                                initialTitle: `Thoughts on ${item.dish_name}`,
+                                targetType: "dish",
+                                targetId: item.dish_id,
                               }}
                             >
                               <button
@@ -433,17 +515,17 @@ function MyOrdersPage() {
                               </button>
                             </Link>
 
+
                             {/* Discuss / complain / compliment chef, if known */}
                             {item.chef_id && (
                               <>
                                 <Link
                                   to="/discussion"
                                   state={{
-                                    initialTargetType: "chef",
-                                    initialTargetId: item.chef_id,
-                                    initialTitle: `Discussion on Chef ${
-                                      item.chef_name || ""
-                                    } (Order #${order.id})`,
+                                    initialCategory: "chef",
+                                    initialTitle: `Thoughts on Chef ${item.chef_name || ""}`,
+                                    targetType: "chef",
+                                    targetId: item.chef_id,
                                   }}
                                 >
                                   <button
@@ -517,117 +599,115 @@ function MyOrdersPage() {
                   <div style={{ marginBottom: "0.3rem" }}>
                     <strong>Rate delivery quality / manners (1–5):</strong>
                   </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                      flexWrap: "wrap",
-                    }}
-                  >
-                    <select
-                      value={deliveryRatings[order.id] || ""}
-                      onChange={(e) =>
-                        handleDeliveryRatingChange(order.id, e.target.value)
-                      }
-                      style={{ padding: "0.25rem 0.4rem" }}
-                    >
-                      <option value="">Select</option>
-                      <option value="1">1 ★</option>
-                      <option value="2">2 ★★</option>
-                      <option value="3">3 ★★★</option>
-                      <option value="4">4 ★★★★</option>
-                      <option value="5">5 ★★★★★</option>
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => submitDeliveryRating(order.id)}
-                      disabled={ratingLoadingKey === `delivery-${order.id}`}
-                      style={{
-                        padding: "0.25rem 0.6rem",
-                        borderRadius: "999px",
-                        border: "1px solid #20c997",
-                        backgroundColor: "#e6fcf5",
-                        color: "#087f5b",
-                        cursor: "pointer",
-                        fontSize: "0.8rem",
-                      }}
-                    >
-                      {ratingLoadingKey === `delivery-${order.id}`
-                        ? "Submitting..."
-                        : "Rate delivery"}
-                    </button>
-                  </div>
+
+                  {(() => {
+                    const existingDelivery = order.my_delivery_rating ?? null;
+                    const key = `delivery-${order.id}`;
+                    const currentDelivery =
+                      deliveryRatings[order.id] !== undefined
+                        ? deliveryRatings[order.id]
+                        : existingDelivery
+                        ? String(existingDelivery)
+                        : "";
+
+                    return (
+                      <>
+                        {/* Rating controls */}
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "0.5rem",
+                            flexWrap: "wrap",
+                            marginBottom: "0.5rem",
+                          }}
+                        >
+                          <select
+                            value={currentDelivery}
+                            onChange={(e) =>
+                              handleDeliveryRatingChange(order.id, e.target.value)
+                            }
+                            style={{ padding: "0.25rem 0.4rem" }}
+                            disabled={existingDelivery !== null}  // 👈 disable if already rated
+                          >
+                            <option value="">Select</option>
+                            <option value="1">1 ★</option>
+                            <option value="2">2 ★★</option>
+                            <option value="3">3 ★★★</option>
+                            <option value="4">4 ★★★★</option>
+                            <option value="5">5 ★★★★★</option>
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => submitDeliveryRating(order.id)}
+                            disabled={existingDelivery !== null || ratingLoadingKey === key}
+                            style={{
+                              padding: "0.25rem 0.6rem",
+                              borderRadius: "999px",
+                              border: "1px solid #20c997",
+                              backgroundColor:
+                                existingDelivery !== null ? "#e9ecef" : "#e6fcf5",
+                              color: existingDelivery !== null ? "#6c757d" : "#087f5b",
+                              cursor: existingDelivery !== null ? "not-allowed" : "pointer",
+                              fontSize: "0.8rem",
+                            }}
+                          >
+                            {existingDelivery !== null
+                              ? `Already rated: ${existingDelivery}★`
+                              : ratingLoadingKey === key
+                              ? "Submitting..."
+                              : "Rate delivery"}
+                          </button>
+                        </div>
+
+                        {/* ⬇️ Buttons: complain/compliment delivery */}
+                        {order.delivery_job && order.delivery_job.courier_id && (
+                          <div
+                            style={{
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: "0.4rem",
+                              fontSize: "0.85rem",
+                            }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => fileComplaintAboutDelivery(order)}
+                              style={{
+                                padding: "0.25rem 0.6rem",
+                                borderRadius: "999px",
+                                border: "1px solid #dc3545",
+                                backgroundColor: "#f8d7da",
+                                color: "#842029",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Complain about delivery
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => fileComplimentAboutDelivery(order)}
+                              style={{
+                                padding: "0.25rem 0.6rem",
+                                borderRadius: "999px",
+                                border: "1px solid #198754",
+                                backgroundColor: "#d1f7e3",
+                                color: "#0f5132",
+                                cursor: "pointer",
+                              }}
+                            >
+                              Compliment delivery
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
-
-              {/* Delivery discussion + feedback (per order) */}
-              {isDelivered &&
-                order.delivery_job &&
-                order.delivery_job.courier_id && (
-                  <div
-                    style={{
-                      marginTop: "0.5rem",
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: "0.4rem",
-                      fontSize: "0.85rem",
-                    }}
-                  >
-                    <Link
-                      to="/discussion"
-                      state={{
-                        initialTargetType: "delivery",
-                        initialTargetId: order.delivery_job.courier_id,
-                        initialTitle: `Discussion on delivery for Order #${order.id}`,
-                      }}
-                    >
-                      <button
-                        type="button"
-                        style={{
-                          padding: "0.25rem 0.6rem",
-                          borderRadius: "999px",
-                          border: "1px solid #6c757d",
-                          backgroundColor: "#f8f9fa",
-                          color: "#343a40",
-                          cursor: "pointer",
-                        }}
-                      >
-                        Discuss delivery
-                      </button>
-                    </Link>
-
-                    <button
-                      type="button"
-                      onClick={() => fileComplaintAboutDelivery(order)}
-                      style={{
-                        padding: "0.25rem 0.6rem",
-                        borderRadius: "999px",
-                        border: "1px solid #dc3545",
-                        backgroundColor: "#f8d7da",
-                        color: "#842029",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Complain about delivery
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => fileComplimentAboutDelivery(order)}
-                      style={{
-                        padding: "0.25rem 0.6rem",
-                        borderRadius: "999px",
-                        border: "1px solid #198754",
-                        backgroundColor: "#d1f7e3",
-                        color: "#0f5132",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Compliment delivery
-                    </button>
-                  </div>
-                )}
+    
             </div>
           );
         })

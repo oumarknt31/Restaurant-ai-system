@@ -40,6 +40,7 @@ def create_app():
     from routes.knowledge_routes import knowledge_bp
     from routes.manager_routes import manager_bp
     from routes.discussion_routes import discussion_bp
+    from routes.recommendation_routes import recommendation_bp
 
 
 
@@ -56,6 +57,7 @@ def create_app():
     app.register_blueprint(knowledge_bp)
     app.register_blueprint(manager_bp)
     app.register_blueprint(discussion_bp)
+    app.register_blueprint(recommendation_bp)
 
 
 

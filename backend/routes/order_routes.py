@@ -126,20 +126,21 @@ def create_order():
 
     # Check balance + reckless warning logic
     if user.deposit_balance < total:
-        user.warnings += 1
+        # Increment warnings safely
+        user.warnings = (user.warnings or 0) + 1
 
         message = (
             "Insufficient balance for this order; "
             "you have received a warning for reckless ordering."
         )
 
-        # VIP demotion rule
+        # VIP demotion rule: 2 warnings -> demoted to customer
         if user.role == "vip" and user.warnings >= 2:
             user.role = "customer"
-            user.warnings = 0  # warnings cleared on demotion
+            user.warnings = 0  # reset on demotion
             message += " You have been demoted from VIP to regular customer."
 
-        # Registered customer kick-out rule
+        # Registered customer rule: 3 warnings -> deactivated + blacklisted
         elif user.role == "customer" and user.warnings >= 3:
             user.is_active = False
             user.is_blacklisted = True
@@ -231,7 +232,12 @@ def create_order():
 
 @order_bp.route("/user/<int:user_id>", methods=["GET"])
 def list_orders_for_user(user_id):
-    """Fetch all orders for a given user, including dish + chef info for rating."""
+    """
+    Fetch all orders for a given user, including:
+      - dish + chef info
+      - this user's previous food ratings (per dish)
+      - this user's previous delivery rating (per order)
+    """
     user = User.query.get(user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
@@ -244,23 +250,67 @@ def list_orders_for_user(user_id):
 
     data = []
     for o in orders:
+        # --- delivery job info (for delivery rating & discussions) ---
+        job = DeliveryJob.query.filter_by(order_id=o.id).first()
+        if job:
+            courier = job.courier
+            job_data = {
+                "id": job.id,
+                "status": job.status,
+                "courier_id": courier.id if courier else None,
+                "courier_name": courier.name if courier else None,
+            }
+        else:
+            job_data = None
+
+        # --- items + this user's dish ratings ---
         items_data = []
         for item in o.items:
-            dish = item.dish  # relationship from OrderItem -> Dish
+            dish = item.dish
             chef = dish.chef if dish else None
+
+            # this user's last rating for this dish in this order (if any)
+            fb = (
+                Feedback.query.filter(
+                    Feedback.accuser_id == user_id,
+                    Feedback.order_id == o.id,
+                    Feedback.dish_id == item.dish_id,
+                    Feedback.rating.isnot(None),
+                )
+                .order_by(Feedback.created_at.desc())
+                .first()
+            )
+            my_food_rating = fb.rating if fb else None
 
             items_data.append(
                 {
                     "dish_id": item.dish_id,
                     "quantity": item.quantity,
                     "unit_price": item.unit_price,
-                    # Extra fields for UI & rating:
                     "dish_name": dish.name if dish else f"Dish {item.dish_id}",
                     "dish_image_url": dish.image_url if dish else None,
                     "chef_id": chef.id if chef else None,
                     "chef_name": chef.name if chef else None,
+                    "my_food_rating": my_food_rating,   # 👈 NEW
                 }
             )
+
+        # --- this user's delivery rating for this order (if any) ---
+        my_delivery_rating = None
+        if job and job.courier_id:
+            fb_deliv = (
+                Feedback.query.filter(
+                    Feedback.accuser_id == user_id,
+                    Feedback.order_id == o.id,
+                    Feedback.target_user_id == job.courier_id,
+                    Feedback.rating.isnot(None),
+                    Feedback.dish_id.is_(None),  # no dish: it's about delivery
+                )
+                .order_by(Feedback.created_at.desc())
+                .first()
+            )
+            if fb_deliv:
+                my_delivery_rating = fb_deliv.rating
 
         data.append(
             {
@@ -270,7 +320,10 @@ def list_orders_for_user(user_id):
                 "discount_applied": o.discount_applied,
                 "created_at": o.created_at.isoformat(),
                 "items": items_data,
+                "delivery_job": job_data,
+                "my_delivery_rating": my_delivery_rating,  # 👈 NEW
             }
         )
 
     return jsonify({"orders": data})
+

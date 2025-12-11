@@ -54,6 +54,7 @@ def list_topics():
             {
                 "id": t.id,
                 "title": t.title,
+                "body": t.body,                        # 👈 NEW
                 "target_type": t.target_type,
                 "target_dish_id": t.target_dish_id,
                 "target_user_id": t.target_user_id,
@@ -73,6 +74,7 @@ def create_topic():
     {
       "user_id": 1,
       "title": "Is Chef Alice's spicy ramen too spicy?",
+      "body": "Longer description of what I experienced...",
       "target_type": "dish" | "chef" | "delivery",
       "target_id": 3
     }
@@ -81,6 +83,7 @@ def create_topic():
 
     user_id = data.get("user_id")
     title = (data.get("title") or "").strip()
+    body = (data.get("body") or "").strip()        # 👈 NEW
     target_type = (data.get("target_type") or "").strip().lower()
     target_id = data.get("target_id")
 
@@ -108,6 +111,7 @@ def create_topic():
             return jsonify({"error": "Dish not found"}), 404
         topic = DiscussionTopic(
             title=title,
+            body=body,                      # 👈 NEW
             target_type="dish",
             target_dish_id=dish.id,
             created_by_id=user.id,
@@ -117,7 +121,6 @@ def create_topic():
         if not target_user:
             return jsonify({"error": "Target user not found"}), 404
 
-        # Optional: enforce that the target is actually a chef or delivery role
         if target_type == "chef" and target_user.role not in ["chef", "junior_chef"]:
             return jsonify({"error": "Target is not a chef"}), 400
         if target_type == "delivery" and target_user.role not in ["courier", "delivery"]:
@@ -125,6 +128,7 @@ def create_topic():
 
         topic = DiscussionTopic(
             title=title,
+            body=body,                      # 👈 NEW
             target_type=target_type,
             target_user_id=target_user.id,
             created_by_id=user.id,
@@ -140,6 +144,7 @@ def create_topic():
             {
                 "id": topic.id,
                 "title": topic.title,
+                "body": topic.body,              # 👈 NEW
                 "target_type": topic.target_type,
                 "target_dish_id": topic.target_dish_id,
                 "target_user_id": topic.target_user_id,
@@ -149,6 +154,7 @@ def create_topic():
         ),
         201,
     )
+
 
 
 # --------- Posts in a topic ---------

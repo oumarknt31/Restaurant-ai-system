@@ -1,6 +1,6 @@
 // src/pages/DiscussionPage.jsx
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import api from "../api/client";
 import { getCurrentUser } from "../auth/user";
 
@@ -10,16 +10,26 @@ function DiscussionPage() {
   const [topics, setTopics] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
   // creating a new topic
-  const [newCategory, setNewCategory] = useState("general"); // chef | dish | delivery | general
+  const [newCategory, setNewCategory] = useState("dish"); // "dish" | "chef" | "delivery"
   const [newTitle, setNewTitle] = useState("");
   const [newBody, setNewBody] = useState("");
+  const [bodyPlaceholder, setBodyPlaceholder] = useState(
+    "Share your thoughts about this dish, chef, or delivery experience..."
+  );
   const [creating, setCreating] = useState(false);
+
+  // target (who/what the topic is about)
+  const [targetType, setTargetType] = useState(null); // "dish" | "chef" | "delivery"
+  const [targetId, setTargetId] = useState(null);     // number
 
   // replying
   const [replyText, setReplyText] = useState({});
   const [replyLoadingId, setReplyLoadingId] = useState(null);
+
+  const location = useLocation();
 
   useEffect(() => {
     const user = getCurrentUser();
@@ -27,13 +37,78 @@ function DiscussionPage() {
     fetchTopics();
   }, []);
 
+  // Prefill when coming from Menu or My Orders
+  useEffect(() => {
+    const state = location.state;
+
+    // From MenuPage.handleDiscussDish:
+    //   state = { fromDish: { id, name } }
+    if (state?.fromDish) {
+      const { id, name } = state.fromDish;
+      setNewCategory("dish");
+      setTargetType("dish");
+      setTargetId(id);
+      setNewTitle(`Thoughts on ${name}`);
+      setBodyPlaceholder(
+        `Share your experience with "${name}" – flavor, portion, spice level, etc.`
+      );
+      return;
+    }
+
+    // From MyOrdersPage:
+    //   state = { initialCategory, initialTitle, targetType, targetId }
+    if (state?.initialCategory || state?.initialTitle || state?.targetType) {
+      if (state.initialCategory) {
+        setNewCategory(state.initialCategory);
+      }
+      if (state.targetType) {
+        setTargetType(state.targetType);
+      } else if (state.initialCategory) {
+        setTargetType(state.initialCategory);
+      }
+      if (state.targetId != null) {
+        setTargetId(state.targetId);
+      }
+
+      if (state.initialTitle) {
+        setNewTitle(state.initialTitle);
+        setBodyPlaceholder(
+          `Share your thoughts about: ${state.initialTitle}`
+        );
+      }
+    }
+  }, [location.state]);
+
   async function fetchTopics() {
     setError("");
+    setSuccess("");
     setLoading(true);
     try {
-      // adjust to your backend route if needed, e.g. "/discussion/topics"
+      // 1) Get ALL topics (from all users)
       const res = await api.get("/discussion/topics");
-      setTopics(res.data || []);
+      const rawTopics = res.data || [];
+
+      // 2) For each topic, fetch its posts
+      const topicsWithPosts = await Promise.all(
+        rawTopics.map(async (t) => {
+          try {
+            const postsRes = await api.get(`/discussion/topics/${t.id}/posts`);
+            const payload = postsRes.data || {};
+            return {
+              ...t,
+              posts: payload.posts || [],
+            };
+          } catch (err) {
+            console.error("Failed to load posts for topic", t.id, err);
+            return {
+              ...t,
+              posts: [],
+            };
+          }
+        })
+      );
+
+      setTopics(topicsWithPosts);
     } catch (err) {
       console.error(err);
       setError("Failed to load discussion topics.");
@@ -49,8 +124,24 @@ function DiscussionPage() {
     );
   }
 
+  function categoryLabel(type) {
+    switch (type) {
+      case "chef":
+        return "Chef";
+      case "dish":
+        return "Dish";
+      case "delivery":
+        return "Delivery";
+      default:
+        return "General";
+    }
+  }
+
   async function handleCreateTopic(e) {
     e.preventDefault();
+    setError("");
+    setSuccess("");
+
     if (!currentUser) {
       setError("You must be logged in to start a discussion.");
       return;
@@ -59,33 +150,40 @@ function DiscussionPage() {
       setError("Your role is not allowed to start topics.");
       return;
     }
-    if (!newTitle.trim() || !newBody.trim()) {
-      setError("Please provide both a title and content.");
+    if (!newTitle.trim()) {
+      setError("Please provide a title.");
       return;
     }
 
-    setError("");
-    setCreating(true);
+    // Decide which target we are using
+    const effectiveTargetType = targetType || newCategory;
+    const effectiveTargetId = targetId;
 
+    if (!effectiveTargetType || effectiveTargetId == null) {
+      setError(
+        "This demo expects you to start discussions from a specific dish/chef/delivery (e.g., via Menu or My Orders)."
+      );
+      return;
+    }
+
+    setCreating(true);
     try {
-      // This assumes a backend route like POST /api/discussion/topics
-      // Body shape: adjust if your backend expects different keys
+      // Match your backend: POST /api/discussion/topics
       await api.post("/discussion/topics", {
-        starter_id: currentUser.id,
-        category: newCategory, // "chef", "dish", "delivery", "general"
+        user_id: currentUser.id,
         title: newTitle.trim(),
-        body: newBody.trim(),
+        body: newBody.trim(), 
+        target_type: effectiveTargetType, // "dish" | "chef" | "delivery"
+        target_id: effectiveTargetId,
       });
 
-      setNewTitle("");
+      // Clear the content box only; keep category/title targeted if user wants more threads
       setNewBody("");
-      setNewCategory("general");
+      setSuccess("Topic created successfully.");
       await fetchTopics();
     } catch (err) {
       console.error(err);
-      setError(
-        err.response?.data?.error || "Failed to create discussion topic."
-      );
+      setError(err.response?.data?.error || "Failed to create discussion topic.");
     } finally {
       setCreating(false);
     }
@@ -108,13 +206,13 @@ function DiscussionPage() {
     }
 
     setError("");
+    setSuccess("");
     setReplyLoadingId(topicId);
 
     try {
-      // assumes POST /api/discussion/topics/<id>/posts
       await api.post(`/discussion/topics/${topicId}/posts`, {
-        author_id: currentUser.id,
-        body: text,
+        user_id: currentUser.id,
+        content: text,
       });
 
       setReplyText((prev) => ({ ...prev, [topicId]: "" }));
@@ -127,18 +225,47 @@ function DiscussionPage() {
     }
   }
 
-  function categoryLabel(cat) {
-    switch (cat) {
-      case "chef":
-        return "Chef";
-      case "dish":
-        return "Dish";
-      case "delivery":
-        return "Delivery";
-      default:
-        return "General";
+  async function handleComplaintAboutComment(topicId, comment) {
+    if (!currentUser) {
+      setError("You must be logged in to file a complaint.");
+      return;
+    }
+
+    if (!comment.author_id) {
+      setError("Cannot identify the author of this comment.");
+      return;
+    }
+
+    const previewText = comment.content || comment.body || "";
+    const reason = window.prompt(
+      `Describe your complaint about this comment by ${
+        comment.author_name || "this user"
+      } (optional):`,
+      previewText ? `"${previewText}"` : ""
+    );
+
+    setError("");
+    setSuccess("");
+
+    try {
+      await api.post("/reputation/file", {
+        accuser_id: currentUser.id,
+        target_user_id: comment.author_id,
+        type: "complaint",
+        order_id: null,         // discussion-based complaint, not tied to an order
+        reason: reason || undefined,
+      });
+
+      setSuccess("Complaint about this comment has been submitted for manager review.");
+    } catch (err) {
+      console.error(err);
+      setError(
+        err.response?.data?.error || "Failed to submit complaint about this comment."
+      );
     }
   }
+
+  // ---- render ----
 
   if (!currentUser) {
     return (
@@ -162,6 +289,9 @@ function DiscussionPage() {
 
       {error && (
         <p style={{ color: "red", marginBottom: "0.5rem" }}>Error: {error}</p>
+      )}
+      {success && (
+        <p style={{ color: "green", marginBottom: "0.5rem" }}>{success}</p>
       )}
 
       {/* New topic form */}
@@ -194,9 +324,8 @@ function DiscussionPage() {
                   onChange={(e) => setNewCategory(e.target.value)}
                   style={{ padding: "0.25rem 0.5rem" }}
                 >
-                  <option value="general">General</option>
-                  <option value="chef">Chef</option>
                   <option value="dish">Dish</option>
+                  <option value="chef">Chef</option>
                   <option value="delivery">Delivery</option>
                 </select>
               </div>
@@ -208,7 +337,7 @@ function DiscussionPage() {
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
                   style={{ width: "100%", padding: "0.3rem" }}
-                  placeholder="e.g., Amazing pasta from Chef Alex"
+                  placeholder="e.g., Thoughts on Spicy Ramen"
                 />
               </div>
             </div>
@@ -221,7 +350,7 @@ function DiscussionPage() {
                 onChange={(e) => setNewBody(e.target.value)}
                 rows={3}
                 style={{ width: "100%", padding: "0.4rem" }}
-                placeholder="Share your thoughts about the dish, chef, or delivery experience..."
+                placeholder={bodyPlaceholder}
               />
             </div>
 
@@ -254,7 +383,7 @@ function DiscussionPage() {
           <p>No topics yet. Be the first to start one!</p>
         ) : (
           topics.map((topic) => {
-            const posts = topic.posts || []; // defensive: in case backend doesn't include posts
+            const posts = topic.posts || [];
             return (
               <div
                 key={topic.id}
@@ -266,55 +395,82 @@ function DiscussionPage() {
                   backgroundColor: "#ffffff",
                 }}
               >
+
+                {/* Header: title + author + date + replies + Report */}
                 <div
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
                     gap: "0.75rem",
+                    marginBottom: "0.35rem",
                   }}
                 >
+                  {/* LEFT SIDE */}
                   <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-                      <h4 style={{ margin: 0 }}>{topic.title}</h4>
-                      <span
-                        style={{
-                          padding: "0.1rem 0.5rem",
-                          borderRadius: "999px",
-                          fontSize: "0.7rem",
-                          backgroundColor: "#e7f5ff",
-                          border: "1px solid #74c0fc",
-                          color: "#0b7285",
-                        }}
-                      >
-                        {categoryLabel(topic.category)}
-                      </span>
-                    </div>
+                    <h3
+                      style={{
+                        margin: 0,
+                        fontSize: "1.05rem",
+                      }}
+                    >
+                      {topic.title}
+                    </h3>
+
                     <p
                       style={{
-                        margin: "0.15rem 0 0.35rem 0",
+                        margin: "0.2rem 0 0",
                         fontSize: "0.8rem",
                         color: "#6c757d",
                       }}
                     >
-                      Started by{" "}
-                      <strong>{topic.starter_name || "Unknown"}</strong>{" "}
-                      {topic.created_at &&
-                        `on ${new Date(topic.created_at).toLocaleString()}`}
+                      Started by <strong>{topic.created_by_name || "Unknown user"}</strong>
+                      {topic.created_at && (
+                        <>
+                          {" "}on{" "}
+                          {new Date(topic.created_at).toLocaleString()}
+                        </>
+                      )}
                     </p>
                   </div>
+
+                  {/* RIGHT SIDE */}
                   <div style={{ textAlign: "right", fontSize: "0.8rem" }}>
                     <div>
                       <strong>{posts.length}</strong> replies
                     </div>
-                    {topic.target_display && (
-                      <div style={{ color: "#495057" }}>
-                        About: {topic.target_display}
-                      </div>
+
+                    {currentUser && currentUser.id !== topic.created_by_id && (
+                      <Link
+                        to="/feedback"
+                        state={{
+                          targetUserId: topic.created_by_id,
+                          targetKind: "customer",
+                          displayName: topic.created_by_name || "this user",
+                          orderId: null,
+                          context: "discussion",
+                          topicId: topic.id,
+                          topicTitle: topic.title,
+                          type: "complaint",
+                        }}
+                        style={{
+                          marginTop: "0.35rem",
+                          display: "inline-block",
+                          padding: "0.18rem 0.7rem",
+                          borderRadius: "999px",
+                          border: "1px solid #dc3545",
+                          backgroundColor: "#f8d7da",
+                          color: "#842029",
+                          textDecoration: "none",
+                          fontSize: "0.75rem",
+                        }}
+                      >
+                        Report topic
+                      </Link>
                     )}
                   </div>
                 </div>
 
-                {/* Initial body */}
+                {/* Topic body */}
                 {topic.body && (
                   <div
                     style={{
@@ -333,7 +489,7 @@ function DiscussionPage() {
                 {posts.length > 0 && (
                   <div
                     style={{
-                      marginTop: "0.5rem",
+                      marginTop: "0.4rem",
                       paddingTop: "0.4rem",
                       borderTop: "1px solid #f1f3f5",
                     }}
@@ -349,7 +505,10 @@ function DiscussionPage() {
                         <span style={{ fontWeight: 600 }}>
                           {p.author_name || "User"}:
                         </span>{" "}
-                        <span>{p.body}</span>
+                        <span>
+                          {p.content || p.body || "[no content]"}
+                        </span>
+
                         {p.created_at && (
                           <span
                             style={{
@@ -360,6 +519,26 @@ function DiscussionPage() {
                           >
                             {new Date(p.created_at).toLocaleString()}
                           </span>
+                        )}
+
+                        {/* Complain about comment */}
+                        {currentUser && currentUser.id !== p.author_id && (
+                          <button
+                            type="button"
+                            onClick={() => handleComplaintAboutComment(topic.id, p)}
+                            style={{
+                              marginLeft: "0.5rem",
+                              padding: "0.15rem 0.6rem",
+                              borderRadius: "999px",
+                              border: "1px solid #dc3545",
+                              backgroundColor: "#f8d7da",
+                              color: "#842029",
+                              fontSize: "0.75rem",
+                              cursor: "pointer",
+                            }}
+                          >
+                            Complain about comment
+                          </button>
                         )}
                       </div>
                     ))}
@@ -416,6 +595,7 @@ function DiscussionPage() {
           })
         )}
       </section>
+
     </div>
   );
 }

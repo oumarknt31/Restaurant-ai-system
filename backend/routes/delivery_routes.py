@@ -289,6 +289,10 @@ def list_jobs_for_courier(user_id):
                 "agreed_fee": job.agreed_fee,
                 "suggested_fee": suggested_fee,
                 "created_at": job.created_at.isoformat() if job.created_at else None,
+                # 👇 NEW: info so courier can file feedback about the customer
+                "customer_id": job.customer_id,
+                "customer_name": job.customer.name if job.customer else None,
+                "order_status": order.status if order else None,
             }
         )
 

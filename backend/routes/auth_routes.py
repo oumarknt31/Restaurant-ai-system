@@ -37,6 +37,7 @@ def register():
                 "warnings": user.warnings or 0,
                 "is_blacklisted": user.is_blacklisted,
                 "is_active": user.is_active,
+                "is_blacklisted": user.is_blacklisted,
             },
         }
     ), 201
@@ -73,6 +74,7 @@ def login():
                 "warnings": user.warnings or 0,
                 "is_blacklisted": user.is_blacklisted,
                 "is_active": user.is_active,
+                "deposit_balance": float(user.deposit_balance or 0.0),
             }
         }
     ), 200

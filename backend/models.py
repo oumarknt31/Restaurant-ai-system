@@ -98,13 +98,14 @@ class Feedback(db.Model):
     target_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=True)
 
+    # 👇 NEW: which dish this rating/feedback is about (if any)
+    dish_id = db.Column(db.Integer, db.ForeignKey("dish.id"), nullable=True)
+
     # Optional rating, e.g. 1–5 (mainly for compliments / chef ratings)
     rating = db.Column(db.Integer, nullable=True)
 
     reason = db.Column(db.Text, nullable=True)
 
-    # For complaints: 'pending', 'upheld', 'dismissed', 'cancelled_by_compliment'
-    # For compliments: 'applied'
     status = db.Column(db.String(32), default="pending", nullable=False)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -122,6 +123,10 @@ class Feedback(db.Model):
         "User", foreign_keys=[manager_id], backref="handled_feedback", lazy=True
     )
     order = db.relationship("Order", backref="feedback", lazy=True)
+
+    # 👇 NEW: relationship back to the rated dish
+    dish = db.relationship("Dish", backref="dish_feedback", lazy=True)
+
 
 
 
@@ -217,6 +222,9 @@ class DiscussionTopic(db.Model):
     # Title of the thread
     title = db.Column(db.String(200), nullable=False)
 
+    # NEW: main body/description of the topic
+    body = db.Column(db.Text, nullable=True)
+
     # What is the topic about?
     # "dish", "chef", or "delivery"
     target_type = db.Column(db.String(20), nullable=False)
@@ -233,9 +241,18 @@ class DiscussionTopic(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     # Relationships
-    created_by = db.relationship("User", foreign_keys=[created_by_id], backref="discussion_topics_started")
-    target_user = db.relationship("User", foreign_keys=[target_user_id], backref="discussion_topics_about")
+    created_by = db.relationship(
+        "User",
+        foreign_keys=[created_by_id],
+        backref="discussion_topics_started",
+    )
+    target_user = db.relationship(
+        "User",
+        foreign_keys=[target_user_id],
+        backref="discussion_topics_about",
+    )
     target_dish = db.relationship("Dish", backref="discussion_topics")
+
 
 
 class DiscussionPost(db.Model):

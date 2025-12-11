@@ -1,42 +1,132 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+/* === App layout shell === */
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+/* Top navbar */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(14px);
+  background: rgba(15, 23, 42, 0.9);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e5e7eb;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1.5rem;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+/* Brand on left */
+.app-brand {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
+.app-brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 30%, #f97316, #ef4444);
 }
 
+/* Nav links in the middle */
+.nav-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: center;
+  margin: 0 1rem;
+}
+
+.nav-link {
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  border: 1px solid transparent;
+  color: #e5e7eb;
+  text-decoration: none;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease,
+    transform 80ms ease;
+}
+
+.nav-link:hover {
+  background-color: rgba(148, 163, 184, 0.22);
+  border-color: rgba(148, 163, 184, 0.4);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+/* Right side: user info / login / warning badge */
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+}
+
+.nav-user-name {
+  font-weight: 600;
+}
+
+.nav-warning-pill {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  border: 1px solid #f97316;
+  background-color: rgba(248, 250, 252, 0.06);
+  color: #fed7aa;
+}
+
+/* Main content area */
+.app-main {
+  flex: 1;
+  padding: 1.5rem 1.5rem 2rem;
+  display: flex;
+  justify-content: center;
+}
+
+.app-main-inner {
+  width: 100%;
+  max-width: 1100px;
+}
+
+/* Generic card style (you can reuse via className if you like) */
 .card {
-  padding: 2em;
+  border-radius: 16px;
+  background-color: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.65);
+  padding: 1.2rem 1.4rem;
+  color: #e5e7eb;
 }
 
-.read-the-docs {
-  color: #888;
+/* Make things breathe on small screens */
+@media (max-width: 640px) {
+  .app-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
+  }
+
+  .nav-links {
+    justify-content: flex-start;
+  }
+
+  .app-main {
+    padding: 1rem;
+  }
 }
